@@ -6,17 +6,26 @@
     as the EERPOM has a  speced write line of 100000 cycles
 */
 
+#include "setup.h"
+
 int update_EEPROM() {
   // define temp varbles
   byte w_count[4];
+
+#ifdef __BRIGHTDEBUG
   Serial.print("Checking stored brightness limit level");  // for debug only
+#endif
   if (bright_lim == EEPROM.read(brlim_add))
   {
+#ifdef __BRIGHTDEBUG
     Serial.println(", no action needed");  // for debug only
+#endif
     return false;    // no need for action just return
   }
+#ifdef __BRIGHTDEBUG
   Serial.println();
   Serial.println("Updating Stored bright limit value");
+#endif
   // First get the existing number of EEPROM writes
   // number of EEPROM writes is stored as 4 8bit bytes which are then 'rebuilt'
   // to a long integer
@@ -58,12 +67,9 @@ int update_EEPROM() {
 
   EEPROM.write(brlim_add, bright_lim);
 
-  Serial.print("Stored bright limit updated, number of EEPROM write = ");
+  Serial.print("Stored bright limit updated, # EEPROM write = ");
   Serial.println(EEPROM_w);
   Serial.println();
-
-
-
 
 }
 

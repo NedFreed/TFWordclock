@@ -2,9 +2,10 @@
    WORD CLOCK - 8x8 For use with Tempus Fugit board
    By David Saul https://meanderingpi.wordpress.com/
 
+   GPS modifications by Ned Freed, ned.freed@mrochek.com, August 2016
+
    Release Version 1 - previuos development version  = rev 6 
    
-
    Inspired by the work of Andy Doro - NeoPixel WordClock from the Adafruit website
 
    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
@@ -21,7 +22,41 @@
    - RTClib https://github.com/adafruit/RTClib
    - LedControl https://github.com/wayoda/LedControl/releases
 
+   GPS support requires the TinyGPS library by Mikal Hart:
+   - TinyGPS http://arduiniana.org/libraries/TinyGPS/
+
+   Arduino pin usage
+
+   D0   - USB serial TX
+   D1   - USB serial RX
+   D2   - LDR source voltage
+   D3   - Debug output
+   D4   - GPS Tx
+   D5   - GPS Rx
+   D6
+   D7   - Button 3 [down]
+   D8   - Button 2 [up]
+   D9   - Button 1 [select]
+   D10  - LedControl (Max 7219) SPI LOAD
+   D11  - LedControl (Max 7219) SPI CLOCK 
+   D12  - LedControl (Max 7219) SPI DATA
+   D13  - (onboard) LED output
+   A0
+   A1
+   A2
+   A3
+   A4   - I2C SDA
+   A5   - I2C SCL
+   A6
+   A7   - LDR sense
+
+   We have only a single MAX72XX.
+
+   Most pin assignments can be changed by editing the constants in setup.h.
+
    Wiring:
+
+
    This code is designed to work with the Tempus Fugit board - a simple wordclock for Arduino and the PiZero
    - add Github ref in here
 
@@ -37,53 +72,24 @@
     S I X S E V E N
 */
 
+#define INCLUDE_DSTINFO
+
+#include "setup.h"
+
 // include the library code:
 #include <Wire.h>
 #include <RTClib.h>
 #include <LedControl.h>
 #include <EEPROM.h>
-
-/*
-  Define pins
-  Buttons
-  Button1 - D9  [select]
-  Button2 - D8  [up]
-  Button3 - D7  [down]
-
-
-  Max7219
-  pin 12 is connected to the DataIn
-  pin 11 is connected to the CLK
-  pin 10 is connected to LOAD
-  We have only a single MAX72XX.
-
-*/
+#ifdef __GPS
+#include <SoftwareSerial.h>
+#include <TinyGPS.h>
+#endif
 
 LedControl lc = LedControl(12, 11, 10, 1);
 
 RTC_DS1307 RTC; // Establish clock object
 DateTime theTime; // Holds current clock time
-
-
-// setup button and LED addresses
-
-const int button1 = 9;
-const int button2 = 8;
-const int button3 = 7;
-
-const int ledPin = 13;      // use for seconds indicator
-
-// setup for LDR connection
-const int analogInPin = A7;  // Analog input connected to LDR
-//const int analogOutPin = 3; // Analog output pin that the LED is attached to  - for debug only
-const int LDR_drv = 2;        // +5v drive for LDR - this is needed for compatability with Pi Zero circuit
-
-
-//EEPROM memory allocations
-const int wr_no0 = 0;
-const int wr_no1 = 1;
-const int wr_no2 = 2;
-const int wr_no3 = 3;
 
 const int brlim_add = 4; // EEPROM address for stored bright lim figure
 
@@ -98,6 +104,17 @@ int bright_lim = 15;  // brightness range limiting variable
 int min_x = 0;
 int hour_x = 0;
 
+#ifdef __GPS
+
+TinyGPS gps;
+SoftwareSerial ss(GPSRx, GPSTx);
+byte lasthour = 25;
+byte lastsecond = 70;
+static bool isDST = false;          // Currently in DST
+static long int lastuj = 0;
+static int doDST = 0;               // DST transition pending today
+
+#endif
 
 void setup() {
   // Setup code
@@ -105,11 +122,8 @@ void setup() {
   //Serial for debugging
   Serial.begin(9600);
 
-  Serial.println("Tempus Fugit WordClock Application ENGLISH Version");
-  Serial.println("Initializing....");
+  Serial.println("Tempus Fugit WordClock Application ENGLISH");
   Serial.println();
-
-
 
   // initialize the pushbutton pins as an inputs:
   pinMode(button1, INPUT);
@@ -123,7 +137,7 @@ void setup() {
   pinMode(LDR_drv, OUTPUT);    // this is the LDR drive voltage
   digitalWrite(LDR_drv, HIGH);
 
-  //pinMode(3,OUTPUT);    // for debug connect LED to D3 to check operation
+  // pinMode(3,OUTPUT);    // for debug connect LED to D3 to check operation
 
   /*
     Setup the MX7219
@@ -141,8 +155,7 @@ void setup() {
 
 
   if (! RTC.isrunning()) {
-    Serial.println("RTC is NOT running!");
-    Serial.println("Will set RTC to original compile time.");
+    Serial.println("RTC is NOT running; set RTC to compile time");
     // display Error message on display
     lc.setColumn(0, 2, B00101010); // display E E E
     delay(1000);
@@ -152,7 +165,7 @@ void setup() {
     Serial.println("RTC Time set.");
   }
 
-  // display INT for 1 second
+  // display INIT for 1 second
   // this is the window to force a RTC time reset
   lc.setColumn(0, 4, B01101001); // display INIT
   delay(1500);
@@ -182,49 +195,39 @@ void setup() {
       lc.clearDisplay(0);   // clear display
       // wait for buttons to be released
       while (digitalRead(button2) == LOW || digitalRead(button3) == LOW)
-      {
         delay(20);
-      }
 
     }
   }
 
-
-
   // Display startup sequence
 
   bright_lim = EEPROM.read(brlim_add);
-  Serial.print("Stored bright limit value = ");
+#ifdef __BRIGHTDEBUG
+  Serial.print("Stored bright limit ");
   Serial.println(bright_lim);
+#endif
   if (bright_lim > 14)     // check to if EEPROM has been written prviously
   {
     bright_lim = 15;       // if not force to 15
   }
-  adjustBrightness();   // set initial display brightness
+  adjustBrightness();      // set initial display brightness
 
-  st_display();// display rollig screen 
+  st_display();            // display rolling screen
+
+#ifdef __GPS
+  ss.begin(GPSBaudRate);   // Wait until after display is stable to start GPS
+#endif
+
   Serial.println("Initialisation complete, clock running");
   Serial.println();
   Serial.println();
 
 }
 
-
-void loop() {
-  // Main Clock code:
-
-  int count = 0;      // setup temp count variable
-
-  // get time from the RTC
-  DateTime theTime = RTC.now();
-  // theTime = calculateTime(); // takes into account DST   - comment out until sorted out
-
-  // save time as simple variable
-  min_x = theTime.minute();
-  hour_x = theTime.hour();
-
   // serial print theTime variable - for debug
 
+void PrintTime(void) {
   Serial.print(theTime.year(), DEC);
   Serial.print('/');
   Serial.print(theTime.month(), DEC);
@@ -237,17 +240,213 @@ void loop() {
   Serial.print(':');
   Serial.print(theTime.second(), DEC);
   Serial.print(' ');
+}
+
+#ifdef __GPS
+
+// Modified version of CACM Algorithm 199, returns days since January 1, 1970
+
+static long int
+modjulday(int year, int month, int day)
+{
+  long int c, ya;
+
+  if (month > 2)
+      month -= 3;
+  else {
+    month += 9;
+    year--;
+  }
+  c = year / 100;
+  ya = year - c * 100;
+  return c * 146097L / 4 + ya * 1461L / 4 + (month * 153L + 2L) / 5L + day +
+         (1721119L - 2440588L);
+}
+
+// Quick and dirty version of mktime
+
+static unsigned long int 
+modmktime(int year, byte month, byte day, byte hour, byte minute, byte second)
+{
+  return modjulday(year, month, day) * (24L * 60L * 60L) +
+         hour * 60L * 60L + minute * 60L + second;
+}
+
+// Inverse conversions
+
+static void
+modjuldate(unsigned long int j, int *year, byte *month, byte *day)
+{
+  long int y, m, d;
+
+  j -= (1721119L - 2440588L);
+  y = (j * 4 - 1) / 146097L;
+  j = j * 4 - y * 146097L - 1;
+  d = j / 4;
+  j = (d * 4 + 3) / 1461L;
+  d = d * 4 - j * 1461L + 3;
+  d = (d + 4) / 4;
+  m = (d * 5 - 3) / 153L;
+  d = d * 5 - m * 153L - 3;
+  *day = (byte)((d + 5) / 5);
+  *year = (int)(y * 100 + j);
+  if (m < 10)
+    *month = (byte)(m + 3);
+  else {
+    *month = (byte)(m - 9);
+    *year += 1;
+  }
+}
+
+// Quick and dirty version of gmtime
+
+static void
+modgmtime(unsigned long int t, int *year, byte *month, byte *day,
+          byte *hour, byte *minute, byte *second)
+{
+  modjuldate(t / 86400L, year, month, day);
+  *hour = (byte)(t / 3600L % 24);
+  *minute = (byte)(t / 60L % 60); 
+  *second = (byte)(t % 60);
+}
+
+void delayprocessGPS(int ms) {
+reread:
+  while (ss.available()) {
+    char c = ss.read();
+    // Serial.write(c); // uncomment this line if you want to see the GPS data flowing
+    if (gps.encode(c)) { // Did a new valid sentence come in?
+      int year;
+      byte month, day, hour, minute, second;
+      unsigned long int now;
+      long int uj;
+      
+      gps.crack_datetime(&year, &month, &day, &hour, &minute, &second);
+      // On startup TinyGPS produces some invalid stuff
+      if (year < 2016)
+        continue;
+      // Once per second max
+      if (lastsecond == second)
+        continue;
+      lastsecond = second;
+      // Toggle the LED - this now acts as an indicator that GPS is working
+      digitalWrite(ledPin, !digitalRead(ledPin)); // toggle led https://www.baldengineer.com/arduino-toggling-outputs.html
+      now = modmktime(year, month, day, hour, minute, second);
+      now += (TIME_OFFSET + (isDST ? DST_OFFSET : 0)) * 60L;
+      modgmtime(now, &year, &month, &day, &hour, &minute, &second);
+      uj = now / 86400L;
+      if (uj != lastuj) {
+        int j;
+        // Day change, DST checks needed
+        for (j = 0; j < DSTLENGTH - 1 && uj >= DSTINFO(j); j++);
+        if ( --j >= 0 ) {
+#ifdef __GPS_DEBUG
+          Serial.print("DST table i/v ");
+          Serial.print(j, DEC);
+          Serial.print('/');
+          Serial.println(DSTINFO(j));
+#endif
+          if (25 == lasthour) {
+            // First GPS sets DST indicator
+            int jj = j;
+            if (uj == DSTINFO(j) && hour < DST_TRANSITION_TIME) jj++;
+            isDST = (jj % 2) == 0;
+            if (isDST) {
+              now +=  DST_OFFSET * 60;
+              modgmtime(now, &year, &month, &day, &hour, &minute, &second);
+            }
+          }
+          if ( uj == DSTINFO(j) && hour < DST_TRANSITION_TIME ) {
+            // Today is the day, set things up to do DST switch
+            doDST = (j % 2) ? -1 : 1;
+#ifdef __GPS_DEBUG
+            Serial.print("doDST ");
+            Serial.println(doDST, DEC);
+#endif
+          }
+        }
+        lastuj = uj;
+      }
+      if (lasthour != hour) {
+        if (doDST != 0 && hour >= DST_TRANSITION_TIME) {
+          // Time to actually do the DST transition
+          Serial.println("*DST*");
+          if (isDST != (doDST > 0)) {
+            if (isDST)
+              now -=  DST_OFFSET * 60;
+            else
+              now += DST_OFFSET * 60;
+            modgmtime(now, &year, &month, &day, &hour, &minute, &second);
+          }
+          isDST = doDST > 0;
+          doDST = 0;
+        }
+#ifdef __GPS_DEBUG
+        Serial.print("Adjusted GPS time ");
+        Serial.print(year, DEC);
+        Serial.print('/');
+        Serial.print(month, DEC);
+        Serial.print('/');
+        Serial.print(day, DEC);
+        Serial.print(' ');
+        Serial.print(hour, DEC);
+        Serial.print(':');
+        Serial.print(minute, DEC);
+        Serial.print(':');
+        Serial.print(second, DEC);
+        Serial.print(' ');
+        Serial.print(now);
+        Serial.print(' ');
+        Serial.println(isDST, DEC);
+#endif
+        RTC.adjust(DateTime(year, month, day, hour, minute, second));
+        Serial.print("RTC set from GPS ");
+        theTime = RTC.now();
+        PrintTime();
+        Serial.println();
+        lasthour = hour;
+      }
+    }
+  }
+  if (ms > 10) {
+    delay(10);
+    ms -= 10;
+    goto reread;
+  }
+  if (ms > 0)
+    delay(ms);
+}
+
+#endif
+
+void loop() {
+  // Main Clock code:
+
+  int count = 0;      // setup temp count variable
+
+  // get time from the RTC
+  theTime = RTC.now();
+  // theTime = calculateTime(); // takes into account DST   - comment out until sorted out
+
+  // save time as simple variable
+  min_x = theTime.minute();
+  hour_x = theTime.hour();
+
+  // Print the time
+  PrintTime();
 
   // Update time display
   displayTime();
 
-  // output LDR info - for degbug only
+#ifdef __BRIGHTDEBUG
+  // output LDR info - for debug only
   Serial.print("Raw = ");
   Serial.print(raw_bright);
-  Serial.print(" Corrected Max =  ");
+  Serial.print(" Max =  ");
   Serial.print(bright);
   Serial.print(" bright_lim = ");
   Serial.println(bright_lim);
+#endif
 
   // check bright_lim var needs to be updated in EEPROM
   update_EEPROM();
@@ -255,19 +454,19 @@ void loop() {
   Serial.println();   // - for debug only
 
   // key check  & general delay loop, setup to give display update time of about once every 2 minutes
-  while (count < 1200)  // setup for 2 min delay
+  while (count < 600)  // setup for 1 min delay
   {
     count++;
-    delay(100);
+    delayprocessGPS(100);
     // check the state of the button1 [select]
     if (digitalRead(button1) == LOW) {
       while (digitalRead(button1) == LOW) // wait for key to be released
       {
-        delay(20);
+        delayprocessGPS(20);
       }
       // valid select button press detected - jump to keypress
       keypress();
-      count = 2000;    // force immediate display update
+      count = 600;    // force immediate display update
     }
 
     /*
@@ -283,66 +482,67 @@ void loop() {
     if (digitalRead(button3) == LOW) {
       while (digitalRead(button3) == LOW) // wait for key to be released
       {
-        delay(20);
+        delayprocessGPS(20);
       }
       bright_lim++;
       if (bright_lim > 15) {
         bright_lim = 15;
         lc.setLed(0, 0, 7, true);     // flash H
-        delay(250);
+        delayprocessGPS(250);
         lc.setLed(0, 0, 7, false);
       }
       lc.setLed(0, 2, 5, true);     // flash * with to indicate every push or S2 or S3
-      delay(250);
+      delayprocessGPS(250);
       lc.setLed(0, 2, 5, false);
-
 
       // update display brighness
       adjustBrightness();
 
-      //for debug only
+      // for debug only
+#ifdef __BRIGHTDEBUG
       Serial.print("Range = ");
       Serial.println(bright_lim);
+#endif
     }
 
     // check the state of the button 2 [dec display limit range]
     if (digitalRead(button2) == LOW) {
       while (digitalRead(button2) == LOW) // wait for key to be released
       {
-        delay(20);
+        delayprocessGPS(20);
       }
       bright_lim--;
       if (bright_lim < 1) {
         bright_lim = 1;
         lc.setLed(0, 0, 5, true);     // flash H
-        delay(250);
+        delayprocessGPS(250);
         lc.setLed(0, 0, 5, false);
       }
       lc.setLed(0, 2, 5, true);     // flash * with to indicate every push or S2 or S3
-      delay(250);
+      delayprocessGPS(250);
       lc.setLed(0, 2, 5, false);
 
       // update display brighness
       adjustBrightness();
 
-      //for debug only
+#ifdef __BRIGHTDEBUG
+      // for debug only
       Serial.print("Range = ");
       Serial.println(bright_lim);
+#endif
     }
-
 
     // check ambient light every 4 seconds
     if (count % 40 == 0)
-    {
       adjustBrightness();
-    }
 
-    // Flash onboard LED every second
+#ifndef __GPS
+    // Flash onboard LED every second - GPS, if enabled, takes care of this
     if (count % 10 == 0)
     {
-      digitalWrite(13, !digitalRead(13)); // toggle led https://www.baldengineer.com/arduino-toggling-outputs.html
+      digitalWrite(ledPin, !digitalRead(ledPin)); // toggle LED https://www.baldengineer.com/arduino-toggling-outputs.html
     }
+#endif
   }
 }
-
 

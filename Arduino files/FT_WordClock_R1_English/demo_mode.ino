@@ -3,7 +3,7 @@ int demo(){
   // clear display and adjust brightness
   lc.clearDisplay(0);
   adjustBrightness();
-  // dun through minutes display
+  // run through minutes display
 
   for (int count = 1; count < 13; count++)
   {

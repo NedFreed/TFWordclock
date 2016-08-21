@@ -1,4 +1,6 @@
 
+#include "setup.h"
+
 // change brightness based on the time of day.
 
 void adjustBrightness() {

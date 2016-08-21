@@ -1,9 +1,9 @@
 
-// check for button 1, if active start TRC update proccess
+// check for button 1, if active start RTC update proccess
 int update_RTC(){
     if (digitalRead(button1) == LOW) {
       Serial.println();
-      Serial.println("RTC update process STARTED");
+      Serial.println("RTC update STARTED");
       lc.clearDisplay(0);   // clear display
 
       // display diagnol line
